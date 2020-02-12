@@ -16,42 +16,47 @@
 
 #include "trx.h"
 
-#include <stdlib.h> // malloc()
+#include <assert.h>
 #include <errno.h>  // ENOMEM, etc.
 #include <stdbool.h>
-#include <assert.h>
 
 wsrep_status_t
-node_trx_execute(node_store_t* const   store,
-                 wsrep_t* const        wsrep,
-                 wsrep_conn_id_t const conn_id)
+node_trx_execute(node_store_t*   const store,
+                 wsrep_t*        const wsrep,
+                 wsrep_conn_id_t const conn_id,
+                 int                   ops_num)
 {
-    wsrep_status_t cert = WSREP_FATAL; // for cleanup
+    wsrep_status_t cert = WSREP_OK; // for cleanup
+
+    static unsigned int const ws_flags =
+        WSREP_FLAG_TRX_START | WSREP_FLAG_TRX_END; // atomic trx
+    wsrep_trx_meta_t ws_meta;
+    wsrep_status_t ret = WSREP_OK;
 
     /* prepare simple transaction and obtain a writeset handle for it */
     wsrep_ws_handle_t ws_handle = { 0, NULL };
-    if (0 != node_store_execute(store, wsrep, &ws_handle))
+    while (ops_num--)
     {
-        return WSREP_TRX_FAIL;
+        if (0 != node_store_execute(store, wsrep, &ws_handle))
+        {
+            ret = WSREP_TRX_FAIL;
+            goto cleanup;
+        }
     }
 
     /* REPLICATION: (replicate and) certify the writeset (pointed to by
      *              ws_handle) with the cluster */
-    static unsigned int const ws_flags =
-        WSREP_FLAG_TRX_START | WSREP_FLAG_TRX_END; // atomic trx
-    wsrep_trx_meta_t ws_meta;
     cert = wsrep->certify(wsrep, conn_id, &ws_handle, ws_flags, &ws_meta);
 
     if (WSREP_BF_ABORT == cert)
     {
-        /* REPLICATON: transaction was signaled to abort due to multi-master
-         *             conflict. It must rollback immediately: it blocks
-         *             transaction that was ordered earlier and will never
-         *             be able to enter commit order. */
+        /* REPLICATION: transaction was signaled to abort due to multi-master
+         *              conflict. It must rollback immediately: it blocks
+         *              transaction that was ordered earlier and will never
+         *              be able to enter commit order. */
         node_store_rollback(store, ws_handle.trx_id);
     }
 
-    wsrep_status_t ret = WSREP_OK;
     /* REPLICATION: writeset was totally ordered, need to enter commit order */
     if (ws_meta.gtid.seqno > 0)
     {
