@@ -106,9 +106,9 @@ worker_master(void* send_ctx)
                                    worker->id,
                                    (int)node->opts->operations);
         }
-        while(   WSREP_OK       == ret // success
-              || WSREP_TRX_FAIL == ret // certification failed, trx rolled back
-                                       // retry/continue
+        while(WSREP_OK           == ret // success
+              || (WSREP_TRX_FAIL == ret // certification failed, trx rolled back
+                  && (usleep(10000),true)) // retry after short sleep
             );
     }
     while (WSREP_CONN_FAIL == ret); // provider in bad state (e.g. non-Primary)
