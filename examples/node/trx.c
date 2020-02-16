@@ -15,6 +15,7 @@
  */
 
 #include "trx.h"
+#include "log.h"
 
 #include <assert.h>
 #include <errno.h>  // ENOMEM, etc.
@@ -37,8 +38,10 @@ node_trx_execute(node_store_t*   const store,
     wsrep_ws_handle_t ws_handle = { 0, NULL };
     while (ops_num--)
     {
-        if (0 != node_store_execute(store, wsrep, &ws_handle))
+        if (0 != (ret = node_store_execute(store, wsrep, &ws_handle)))
         {
+            NODE_INFO("master [%d]: node_store_execute() returned %d",
+                      conn_id, ret);
             ret = WSREP_TRX_FAIL;
             goto cleanup;
         }
@@ -61,7 +64,12 @@ node_trx_execute(node_store_t*   const store,
     if (ws_meta.gtid.seqno > 0)
     {
         ret = wsrep->commit_order_enter(wsrep, &ws_handle, &ws_meta);
-        if (ret) goto cleanup;
+        if (ret)
+        {
+            NODE_ERROR("master [%d]: wsrep::commit_order_enter(%lld) failed: "
+                       "%d", (long long)(ws_meta.gtid.seqno), ret);
+            goto cleanup;
+        }
 
         /* REPLICATION: inside commit monitor
          * Note: we commit transaction only if certification succeded */
@@ -71,7 +79,12 @@ node_trx_execute(node_store_t*   const store,
             node_store_update_gtid(store, &ws_meta.gtid);
 
         ret = wsrep->commit_order_leave(wsrep, &ws_handle, &ws_meta, NULL);
-        if (ret) goto cleanup;
+        if (ret)
+        {
+            NODE_ERROR("master [%d]: wsrep::commit_order_leave(%lld) failed: "
+                       "%d", (long long)(ws_meta.gtid.seqno), ret);
+            goto cleanup;
+        }
     }
     else
     {

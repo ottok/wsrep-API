@@ -153,6 +153,9 @@ store_trx_add_op(struct store_trx_ctx* const trx)
     if (new_ops)
     {
         trx->ops = new_ops;
+#ifndef NDEBUG
+        memset(&trx->ops[trx->ops_num], 0, sizeof(*trx->ops));
+#endif
         trx->ops_num++;
     }
 
@@ -664,6 +667,11 @@ node_store_execute(node_store_t*      const store,
         op->rec_to.version   > trx->rv_gtid.seqno)
     {
         /* transaction read view changed, trx needs to be restarted */
+        NODE_INFO("Transaction read view changed: %lld -> %lld, returning %d",
+                  (long long)trx->rv_gtid.seqno,
+                  (long long)(op->rec_from.version > op->rec_to.version ?
+                              op->rec_from.version : op->rec_to.version),
+                  ret);
         goto error;
     }
 
@@ -679,7 +687,12 @@ node_store_execute(node_store_t*      const store,
         if (store->read_view_support)
         {
             ret = wsrep->assign_read_view(wsrep, ws_handle, &trx->rv_gtid);
-            if (ret && ret != WSREP_NOT_IMPLEMENTED) goto error;
+            if (ret)
+            {
+                NODE_ERROR("wsrep::assign_read_view(%lld) failed: %d",
+                           trx->rv_gtid.seqno, ret);
+                goto error;
+            }
         }
 
         /* Record read view in the writeset for debugging purposes */
@@ -688,7 +701,11 @@ node_store_execute(node_store_t*      const store,
         wsrep_buf_t ws = { .ptr = trx + 1, .len = STORE_GTID_SIZE };
         ret = wsrep->append_data(wsrep, ws_handle, &ws, 1, WSREP_DATA_ORDERED,
                                  true);
-        if (ret) goto error;
+        if (ret)
+        {
+            NODE_ERROR("wsrep::append_data(rv_gtid) failed: %d", ret);
+            goto error;
+        }
     }
 
     /* REPLICATION: append keys touched by the operation
@@ -709,7 +726,11 @@ node_store_execute(node_store_t*      const store,
                             1,   /* single key */
                             WSREP_KEY_REFERENCE,
                             true /* provider shall make a copy of the key */);
-    if (ret) goto error;
+    if (ret)
+    {
+        NODE_ERROR("wsrep::append_key(REFERENCE) failed: %d", ret);
+        goto error;
+    }
 
     /* REPLICATION: Key 2 - the key of the record we want to update */
     store_serialize_uint32(&key_val, op->idx_to);
@@ -718,7 +739,11 @@ node_store_execute(node_store_t*      const store,
                             1,   /* single key */
                             WSREP_KEY_UPDATE,
                             true /* provider shall make a copy of the key */);
-    if (ret) goto error;
+    if (ret)
+    {
+        NODE_ERROR("wsrep::append_key(UPDATE) failed: %d", ret);
+        goto error;
+    }
 
     /* REPLICATION: append transaction operation to the "writeset"
      *              (WS buffer was allocated together with trx context above) */
@@ -730,6 +755,8 @@ node_store_execute(node_store_t*      const store,
     ret = wsrep->append_data(wsrep, ws_handle, &ws, 1, WSREP_DATA_ORDERED, true);
 
     if (!ret) return 0;
+
+    NODE_ERROR("wsrep::append_data(op) failed: %d", ret);
 
 error:
     store_trx_free(trx);
@@ -910,9 +937,11 @@ node_store_commit(node_store_t*       const store,
                     assert(op->rec_from.value == from.value);
                 if (op->rec_to.version == to.version)
                     assert(op->rec_to.value == to.value);
-                assert(!store->read_view_support);
+                if (store->read_view_support) abort();
 
                 store->read_view_fails++;
+
+                NODE_INFO("Read view changed at commit time, rollback trx");
 
                 goto error;
             }
@@ -937,8 +966,8 @@ error:
 }
 
 void
-node_store_rollback(node_store_t*  store,
-                    wsrep_trx_id_t trx_id)
+node_store_rollback(node_store_t*  const store,
+                    wsrep_trx_id_t const trx_id)
 {
     assert(store);
     (void)store;
@@ -948,8 +977,8 @@ node_store_rollback(node_store_t*  store,
 }
 
 void
-node_store_update_gtid(node_store_t*       store,
-                       const wsrep_gtid_t* ws_gtid)
+node_store_update_gtid(node_store_t*       const store,
+                       const wsrep_gtid_t* const ws_gtid)
 {
     assert(store);
 
@@ -967,7 +996,7 @@ node_store_update_gtid(node_store_t*       store,
 }
 
 long
-node_store_read_view_failures(node_store_t* store)
+node_store_read_view_failures(node_store_t* const store)
 {
     assert(store);
 
